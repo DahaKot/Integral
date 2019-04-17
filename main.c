@@ -2,239 +2,160 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <limits.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <assert.h>
 #include <sys/sysinfo.h>
 
-#pragma option -O3
+#pragma GCC optimize ("03")
 
-#define min(a, b) a > b ? b : a
+#define min(a, b) a < b ? a : b
+#define max(a, b) a > b ? a : b
 
-struct thread_params {
+const double DX = 5*1e-9;
+
+struct thread_param {
 	double start;
 	double end;
-	double result;
 	double dx;
+	double res;
 };
 
-void *usefull_routine (void * k);
-void *useless_routine (void * k);
-int n_get(char **argv);
-int *get_info(int *n_proc);
-int in_array(int *arr, int j, int size);
-int init(struct thread_params *params, int n);
+int get_real_procs(int n_proc, int *real_procs);
+int in_array(int x, int *arr, int len);
+void *useful_routine(void *arg);
+void *useless_routine(void *arg);
+void *empty_routine(void *arg);
+void init(struct thread_param *arr, int n);
 
-int main(int argc, char **argv) {
-	if (argv == NULL || argc != 2) {
-        printf("Ayayay!\n");
-        return 1;
-    }
-
-    //get n_threads
-    int n = n_get(argv);
-    if (n == -1) {
-    	return 1;
-    }
-
-    //get number of available cpu-s and their list
-    int n_proc = 0;
-    int *proc = get_info(&n_proc);
-
-    for (int i = 0; i < n_proc; i++) {
-		printf("u_proc: %d\n", proc[i]);
+int main (int argc, char **argv) {
+	if (argc != 2) {
+		printf("Ayayay!\n");
+		return -1;
 	}
 
-	//init threads structures
-	pthread_t *ts = (pthread_t*) calloc(n, sizeof(pthread_t));
-	if (ts == NULL) {
-		return 1;
+	int n = strtol(argv[1], NULL, 10);
+	int n_proc = get_nprocs();
+	int *real_procs = (int *) calloc(n_proc, sizeof(int));
+	int n_real_procs = get_real_procs(n_proc, real_procs);
+
+	int max_n = max(n, n_real_procs);
+	int min_n = min(n, n_real_procs);
+
+	printf("n_real_procs: %d\n", n_real_procs);
+
+	pthread_t *threads = (pthread_t *) calloc(n, sizeof(pthread_t));
+	struct thread_param *thread_parameters = (struct thread_param *) calloc(n, sizeof(struct thread_param));
+	init(thread_parameters, min_n);
+	pthread_attr_t *thread_attributes = (pthread_attr_t *) calloc(n, sizeof(pthread_attr_t));
+	cpu_set_t *cpusets = calloc(n, sizeof(cpu_set_t));
+
+	void *(*routine) (void *) = useful_routine;
+
+	int i = 0;
+	int cur_proc = 0;
+	for (; i < max_n; i++, cur_proc++) {
+		if (i == min_n) {
+			routine = useless_routine;
+		}
+		if (i >= n_real_procs) {
+			routine = empty_routine;
+		}
+		pthread_attr_init(thread_attributes + i);
+
+		CPU_ZERO(cpusets + i);
+		CPU_SET(real_procs[i % n_real_procs], cpusets + i);
+		pthread_attr_setaffinity_np(thread_attributes + i, sizeof(cpu_set_t), cpusets + i);
+
+		pthread_create(threads + i, thread_attributes + i, routine, thread_parameters + i);
 	}
-	struct thread_params *params = (struct thread_params *) calloc(n, sizeof(struct thread_params));
-	pthread_attr_t *pthread_attributes = (pthread_attr_t *) calloc(n, sizeof(pthread_attr_t));
-	if (params == NULL) {
-		free(ts);
-		free(proc);
-		return 1;
+
+	i = 0;
+	for (; i < n; i++) {
+		pthread_join(threads[i], NULL);
 	}
 
-	int err = init(params, min(n_proc, n));
-	if (err != 0) {
-		printf("error\n");
-		free(ts);
-    	free(params);
-    	free(proc);
-		return 1;
+	double sum = 0;
+	i = 0;
+	for (; i < n; i++) {
+		sum += thread_parameters[i].res;
 	}
 
-	cpu_set_t cpu_set;
-	CPU_ZERO(&cpu_set);
-
-	pthread_attr_t attr;
-	err = pthread_attr_init(&attr);
-	if (err != 0) {
-		printf("error\n");
-		free(ts);
-    	free(params);
-    	free(proc);
-		return 1;
-	}
-
-	void * (*routine) (void *) = usefull_routine;
-
-	//start calculations
-    for (int i = 0, proc = 0; i < n; i++, proc++) {
-    	if (i >= n_proc && proc != 0) {
-    		routine = useless_routine;
-    		proc = 0;
-    	}
-    	err = pthread_attr_init(pthread_attributes + i);
-
-    	CPU_ZERO(&cpu_set);
-    	CPU_SET(proc, &cpu_set);
-    	//pthread_attr_setaffinity_np(pthread_attributes + i, sizeof(cpu_set_t), &cpu_set);
-
-    	pthread_create(ts + i, pthread_attributes + i, routine, (void *) (&params[i]));
-    }
-
-    for (int i = 0; i < n; i++) {
-    	pthread_join(*(ts + i), NULL);
-    } 
-
-    double sum = 0;
-    printf("Result from every thread:\n");
-    for (int i = 0; i < n; i++) {
-    	printf("%lg ", params[i].result);
-    	sum += params[i].result;
-    }
-    
-    printf("\nAnd sum: %lg\n", sum);
-
-    err = pthread_attr_destroy(&attr);
-
-    free(ts);
-    free(params);
-    free(proc);
+	printf("sum: %lg\n", sum);
 
 	return 0;
 }
 
-void *useless_routine (void * k) {
-	pthread_exit(0);
-}
+void *useful_routine(void *arg) {
+	struct thread_param *these_param = (struct thread_param *) arg;
 
-int n_get(char **argv) {
-	char *end_ptr = NULL;
-    long int n = strtol(argv[1], &end_ptr, 10);
-    if(end_ptr != NULL && *end_ptr != '\0') {
-        printf("It is not a number\n");
-        return -1;
-    }
-    if (n == LONG_MAX || n == LONG_MIN || n < 1) {
-        printf("Your number is not apropriate\n");
-        return -1;
-    }
+	double a = these_param->start;
+	double b = these_param->end;
+	double dx = these_param->dx;
 
-    return n;
-}
+	double res = these_param->res;
 
-int *get_info(int *n_proc) {
-	*n_proc = get_nprocs();
-	
-	if (*n_proc == 0 || *n_proc > 10) {
-		printf("No processeror O_o_O!\n");
-		assert(0);
+	double x = a;
+	for (; x < b; x += dx) {
+		res += x * dx;
 	}
 
-	int unique_proc_n = 0;
-	int *unique_proc = calloc(*n_proc, sizeof(int));
-	char *path = calloc(56, sizeof(char));
-	char *path_c = "/sys/bus/cpu/devices/cpu0/topology/thread_siblings";
+	these_param->res = res;
 
-	for (int i = 0; i < 56; i++) {
-		path[i] = path_c[i];
+	return NULL;
+}
+
+void *useless_routine(void *arg) {
+	while (1);
+	pthread_exit (0);
+}
+
+void *empty_routine(void *arg) {
+	return NULL;
+}
+
+void init(struct thread_param *arr, int n) {
+	double fraq = 100.0 / (double) n;
+
+	arr[0].start = 0;
+	arr[0].end = fraq;
+	arr[0].dx = DX;
+
+	int i = 1;
+	for (; i < n; i++) {
+		arr[i].start = arr[i-1].end;
+		arr[i].end = arr[i].start + fraq;
+		arr[i].dx = DX;
 	}
+}
 
-	for (int i = 0; i < *n_proc; i++) {
-		path[24] = i + '0';
-		FILE *fd = fopen(path, "r");
-		if (fd == NULL) {
-			break;
+int get_real_procs(int n_proc, int *real_procs) {
+	char path[] = "/sys/bus/cpu/devices/cpu0/topology/core_id";
+
+	int n_real_procs = 0;
+	int i = 0;
+	for (; i < n_proc; i++) {
+		FILE *info = fopen(path, "r");
+
+		int core_id = -1;
+		fscanf(info, "%d", &core_id);
+
+		if (!in_array(core_id, real_procs, n_real_procs)) {
+			real_procs[n_real_procs] = core_id;
+			n_real_procs++;
 		}
 
-		char *str_mask = calloc(4, sizeof(char));
-		int j = 0;
-		fscanf(fd, "%s", str_mask);
-		
-		int mask = strtol(str_mask, NULL, 16);
-
-		while(mask != 0) {
-			if (mask % 2 == 0) {
-				mask = mask >> 1;
-				j++;
-				continue;
-			}
-
-			if (in_array(unique_proc, j, unique_proc_n)) {
-				break;
-			}
-
-			if (j == i) {
-				unique_proc[unique_proc_n] = j;
-				unique_proc_n++;
-			}
-
-			mask = mask >> 1;
-			j++;
-		}
-
-		fclose(fd);
-		free(str_mask);
+		fclose(info);
+		path[24]++;
 	}
 
-	free(path);
-	*n_proc = unique_proc_n;
-	return unique_proc;
+	return n_real_procs;
 }
 
-int in_array(int *arr, int j, int size) {
-	for (int i = 0; i < size; i++) {
-		if (arr[i] == j) {
+int in_array(int x, int *arr, int len) {
+	int i = 0;
+	for (; i < len; i++) {
+		if (x == arr[i]) {
 			return 1;
 		}
 	}
 
 	return 0;
-}
-
-int init(struct thread_params *params, int n) {
-	double fraq = 10.0 / (double) n;
-	params[0].start = 0;
-	params[0].end 	= fraq;
-	params[0].dx 	= 0.00000001;
-	printf("fraq: %lg dx: %lg\n", params[0].end, params[0].dx);
-	for (int i = 1; i < n; i++) {
-		params[i].start = params[i-1].end;
-		params[i].end 	= params[i].start + fraq;
-		params[i].dx 	= 0.00000001;
-	}
-
-	return 0;
-}
-
-void *usefull_routine (void * k) {
-	struct thread_params *these_params = (struct thread_params *) k;
-	double a = these_params->start;
-	double b = these_params->end;
-	double dx = these_params->dx;
-
-	for (double x = a; x < b; x += dx) {
-		these_params->result += x * dx;
-	}
-
-	pthread_exit(0);
 }
